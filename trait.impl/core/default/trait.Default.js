@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["horto_os_ui_shared",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.98.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"horto_os_ui_shared/ops/backup/struct.DiskBackupOpts.html\" title=\"struct horto_os_ui_shared::ops::backup::DiskBackupOpts\">DiskBackupOpts</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.98.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"horto_os_ui_shared/paths/struct.HostPaths.html\" title=\"struct horto_os_ui_shared::paths::HostPaths\">HostPaths</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.98.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"horto_os_ui_shared/context/struct.NonInteractivePrompts.html\" title=\"struct horto_os_ui_shared::context::NonInteractivePrompts\">NonInteractivePrompts</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.98.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"horto_os_ui_shared/resume/struct.ResumeState.html\" title=\"struct horto_os_ui_shared::resume::ResumeState\">ResumeState</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.98.1/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"horto_os_ui_shared/context/struct.StdioPrompts.html\" title=\"struct horto_os_ui_shared::context::StdioPrompts\">StdioPrompts</a>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[1626]}

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["StepStatus"],"fn":["is_stale","load","mark_failed","record_ok","save","status_for"],"struct":["ResumeState","ResumeStepRecord"]};

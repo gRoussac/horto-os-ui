@@ -1,0 +1,2 @@
+createSrcSidebar('[["horto_os_ui_shared",["",[["kits",[],["apt.rs","docker.rs","envfile.rs","fs.rs","mod.rs","systemd.rs","template.rs"]],["ops",[],["backup.rs","doctor.rs","leases.rs","mod.rs","runner.rs","status.rs"]],["steps",[],["d1_docker.rs","m1_minimal.rs","mod.rs","s1_packages.rs","s2_env.rs","s3_backup.rs","s4_stage.rs","s5_apply.rs","s6_validate.rs","s7_activate.rs"]]],["build_info.rs","context.rs","embed.rs","error.rs","lib.rs","paths.rs","pipeline.rs","resume.rs","step.rs"]]]]');
+//{"start":19,"fragment_lengths":[473]}

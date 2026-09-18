@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["backup_disk","backup_etc_initial","backup_etc_timestamped","backup_shrink","backup_status","copy_managed_etc","list_timestamped_etc_backups","plan_disk_backup","probe_disk_backup","root_mount_source"],"struct":["BackupStatus","DiskBackupOpts","DiskBackupProbe","EtcBackupReport","ShrinkBackupOpts"]};

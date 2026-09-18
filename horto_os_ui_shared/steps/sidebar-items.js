@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["d1_docker","m1_minimal","s1_packages","s2_env","s3_backup","s4_stage","s5_apply","s6_validate","s7_activate"]};

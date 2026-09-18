@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ACTIVE_SETUP","BACKUP","DOCKER","ETC","RESUME_FILE"],"fn":["path_str"],"struct":["HostPaths"]};

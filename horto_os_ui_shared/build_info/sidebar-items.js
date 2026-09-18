@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GIT_COMMIT","LONG_VERSION","VERSION"],"fn":["footer_line"]};

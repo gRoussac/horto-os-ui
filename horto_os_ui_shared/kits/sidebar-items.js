@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["apt","docker","envfile","fs","systemd","template"]};

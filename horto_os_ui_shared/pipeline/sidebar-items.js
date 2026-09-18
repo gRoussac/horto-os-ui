@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SetupKind"],"fn":["full_ids","lookup","minimal_ids","pipeline"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["chmod","copy_dir_contents","copy_file","ensure_dir","remove_path","write_file"]};
