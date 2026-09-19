@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["build_info","context","embed","error","kits","ops","paths","pipeline","resume","step","steps"]};
+window.SIDEBAR_ITEMS = {"mod":["build_info","context","embed","error","kits","ops","paths","pipeline","remote","resume","step","steps"]};
