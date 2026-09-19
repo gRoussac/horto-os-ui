@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["describe_container","describe_service"]};

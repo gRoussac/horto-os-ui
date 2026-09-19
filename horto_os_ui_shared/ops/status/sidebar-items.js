@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["box_status","default_urls","setup_status"],"struct":["BoxStatus","SetupStatusReport","StepStatusRow","UrlInfo"]};
+window.SIDEBAR_ITEMS = {"fn":["box_status","service_urls","setup_status"],"struct":["BoxStatus","SetupStatusReport","StepStatusRow","UrlInfo"]};
