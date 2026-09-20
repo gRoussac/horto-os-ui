@@ -198,7 +198,7 @@ pub fn panel_overview_remote(
 ) -> String {
     let mut out = format!("Mode: remote ({host})\n");
     match report {
-        None => out.push_str("No status yet. Press r.\n"),
+        None => out.push_str("No status yet.\n"),
         Some(r) => {
             out.push_str(&format!(
                 "local={}  box={}\nssh={}  api.health={}\nmcp_box={}\n",
@@ -237,5 +237,7 @@ mod tests {
         assert!(panel_cli(true, None).contains("box=?"));
         assert!(!panel_cli(true, None).contains("missing"));
         assert!(panel_ssh(true, "horto", None).contains("Status: ?"));
+        assert!(panel_overview_remote("horto", None, "").contains("No status yet."));
+        assert!(!panel_overview_remote("horto", None, "").contains("Press r"));
     }
 }

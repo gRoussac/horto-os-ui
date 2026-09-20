@@ -49,17 +49,19 @@ enum BoxCliView {
 impl BoxCliView {
     fn as_label(&self) -> &str {
         match self {
-            Self::NotProbed => "?",
+            Self::NotProbed => "…",
             Self::Known(s) => s.as_label(),
         }
     }
 }
 
 fn footer_cli_label(cli_local: &str, remote: bool, box_cli: &BoxCliView) -> String {
-    if remote {
-        format!("local={cli_local} box={}", box_cli.as_label())
-    } else {
-        format!("local={cli_local}")
+    match (remote, box_cli) {
+        (true, BoxCliView::NotProbed) => format!("local={cli_local}"),
+        (true, BoxCliView::Known(_)) => {
+            format!("local={cli_local} box={}", box_cli.as_label())
+        }
+        (false, _) => format!("local={cli_local}"),
     }
 }
 
@@ -179,7 +181,6 @@ impl App {
             app.rebuild_remote_steps(None);
             app.overview_text =
                 tabs::panel_overview_remote(app.remote.as_deref().unwrap_or("?"), None, "");
-            app.message = "Remote: press r to probe".into();
             app.refresh_panel_text();
         } else {
             app.refresh();
@@ -888,8 +889,11 @@ fn main() -> Result<()> {
     install_signal_handlers();
     install_panic_hook();
     let (_guard, mut terminal) = TerminalGuard::enter()?;
-    // Remote: open the TUI first (placeholders). SSH/SCP runs only on refresh (r).
     let mut app = App::new(&cli);
+    // Remote: BatchMode probe at open (no alt-screen suspend; no password UI).
+    if app.is_remote() {
+        app.refresh();
+    }
     run_app(&mut terminal, &mut app)
 }
 
@@ -960,10 +964,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 }
             }
             KeyCode::Char('r') => {
-                if app.remote.is_some() {
-                    with_suspended_tui(terminal, || app.refresh())?;
-                } else {
-                    app.refresh();
+                // Surface probe is BatchMode + Capture: stay in the TUI.
+                app.refresh();
+                if app.remote.is_none() {
                     app.message = "Refreshed".into();
                 }
             }
@@ -999,12 +1002,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         | Screen::Reboot
                 ) =>
             {
-                if app.screen == Screen::Reboot {
-                    app.run_reboot();
-                } else if app.remote.is_some() {
-                    with_suspended_tui(terminal, || app.run_surface_enter())?;
-                } else {
-                    app.run_surface_enter();
+                match app.screen {
+                    Screen::Reboot => app.run_reboot(),
+                    Screen::Ssh | Screen::Cli => {
+                        with_suspended_tui(terminal, || app.run_surface_enter())?;
+                    }
+                    Screen::Api | Screen::Mcp | Screen::Overview => {
+                        app.run_surface_enter();
+                    }
+                    Screen::Setup | Screen::Logs => {}
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1114,11 +1120,12 @@ fn draw_help(f: &mut Frame) {
         "Enter              Setup: run step · surface tabs: action",
         "a                  Run all pipeline steps",
         "b / B              Timestamped /etc backup / disk probe",
-        "r                  Probe surfaces (SSH/CLI/API/MCP)",
+        "r                  Re-probe surfaces (stay in TUI)",
         "c                  Clear Logs (on Logs tab)",
         "d                  Toggle dry-run / apply",
         "y / n              Confirm / cancel",
         "",
+        "Remote open probes SSH/CLI/API/MCP (BatchMode).",
         "Mouse capture is off so you can select and copy text.",
         "Press Esc or ? to close.",
     ]
@@ -1186,7 +1193,7 @@ fn draw_setup(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
     let n = app.logs.len();
     let text = if app.logs.is_empty() {
-        "(empty - press r to probe · c to clear)".to_string()
+        "(empty · c to clear)".to_string()
     } else {
         app.logs
             .iter()
@@ -1258,9 +1265,10 @@ mod tests {
     }
 
     #[test]
-    fn footer_cli_label_not_probed_is_question_not_missing() {
+    fn footer_cli_label_not_probed_omits_box() {
         let label = footer_cli_label("0.1.0 (abc)", true, &BoxCliView::NotProbed);
-        assert_eq!(label, "local=0.1.0 (abc) box=?");
+        assert_eq!(label, "local=0.1.0 (abc)");
+        assert!(!label.contains("box="));
         assert!(!label.contains("missing"));
     }
 
