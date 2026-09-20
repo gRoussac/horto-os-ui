@@ -11,7 +11,7 @@ use crossterm::{
     ExecutableCommand,
 };
 use horto_os_ui_shared::{
-    backup_etc_timestamped, box_status, offer_save_api_token, pipeline, probe_disk_backup,
+    backup_etc_timestamped, box_status, finish_save_api_token, pipeline, probe_disk_backup,
     probe_surfaces, remote_box_snapshot, remote_run_cli, remote_upload_cli, require_root_for_apply,
     setup_run, setup_step, ApplyMode, DiskBackupOpts, HostContext, RemoteBoxCliStatus,
     RemoteOptions, RemoteRunRequest, SetupKind, StdioPrompts, SurfaceProbeReport,
@@ -29,10 +29,53 @@ use std::io::{self, stdout, Write};
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod prompt;
 mod tabs;
+use prompt::{
+    confirm_key, draw_confirm, draw_text_input, ConfirmResult, TextInput, TextInputResult,
+};
 use tabs::Screen;
 
 const READY: &str = "Ready (? help)";
+
+/// In-TUI overlay (non-secret). Passwords use system askpass only.
+#[derive(Debug, Clone)]
+enum Modal {
+    Confirm(ConfirmKind),
+    TextHost(TextInput),
+}
+
+#[derive(Debug, Clone)]
+enum ConfirmKind {
+    DestructiveStep(String),
+    Reboot,
+    SaveToken(String),
+    RebootAfterApply,
+}
+
+impl ConfirmKind {
+    fn title(&self) -> &'static str {
+        match self {
+            Self::DestructiveStep(_) => "Confirm destructive step",
+            Self::Reboot => "Confirm reboot",
+            Self::SaveToken(_) => "Save API token",
+            Self::RebootAfterApply => "Reboot after apply",
+        }
+    }
+
+    fn body(&self) -> String {
+        match self {
+            Self::DestructiveStep(id) => {
+                format!("Step {id} is destructive. Continue?")
+            }
+            Self::Reboot => "Reboot the box now?".into(),
+            Self::SaveToken(_) => {
+                "Save status-api bearer to ~/.config/horto-os-ui/api_token?".into()
+            }
+            Self::RebootAfterApply => "Remote apply succeeded. Reboot the box now?".into(),
+        }
+    }
+}
 
 /// Set by SIGINT/SIGTERM so the loop can restore the tty before exit.
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -69,15 +112,22 @@ fn footer_hints(app: &App) -> &'static str {
     if app.help_open {
         return "Esc or ? close help";
     }
-    if app.confirm_destructive.is_some() {
-        return "Enter/y confirm · Esc/n cancel · Ctrl+C quit";
+    match &app.modal {
+        Some(Modal::Confirm(_)) => {
+            return "Enter/y confirm · Esc/n cancel · Ctrl+C quit";
+        }
+        Some(Modal::TextHost(_)) => {
+            return "Type host · Enter submit · Esc cancel · Ctrl+C quit";
+        }
+        None => {}
     }
     match app.screen {
         Screen::Setup => {
             "j/k select · Enter run · a all · b backup · ←/→ pipeline · d dry-run/apply · r probe · ? help · q quit"
         }
         Screen::Logs => "c clear · Tab screens · r probe · B disk · ? help · q quit",
-        Screen::Overview | Screen::Ssh | Screen::Cli | Screen::Api | Screen::Mcp => {
+        Screen::Ssh => "e edit Host · i install key · Enter edit Host · r probe · Tab · ? help · q quit",
+        Screen::Overview | Screen::Cli | Screen::Api | Screen::Mcp => {
             "Enter action · r probe · Tab screens · ? help · q quit"
         }
         Screen::Reboot => "Enter reboot · r refresh · Tab · ? help · q quit",
@@ -126,7 +176,9 @@ struct App {
     status_lines: Vec<String>,
     overview_text: String,
     panel_text: String,
-    confirm_destructive: Option<String>,
+    modal: Option<Modal>,
+    /// After save-token confirm, offer reboot when remote apply installed payload.
+    pending_reboot_offer: bool,
     help_open: bool,
     message: String,
     /// Local TUI / tip CLI long version (`LONG_VERSION`).
@@ -164,7 +216,8 @@ impl App {
             status_lines: Vec::new(),
             overview_text: String::new(),
             panel_text: String::new(),
-            confirm_destructive: None,
+            modal: None,
+            pending_reboot_offer: false,
             help_open: false,
             message: READY.into(),
             cli_local: LONG_VERSION.to_owned(),
@@ -286,6 +339,7 @@ impl App {
                 host: host.clone(),
                 install_ssh_key: self.install_ssh_key,
                 bin_dir: self.bin_dir.clone(),
+                force_askpass: true,
                 ..RemoteOptions::default()
             };
             if let Some(tag) = self
@@ -371,45 +425,75 @@ impl App {
         self.overview_text =
             tabs::panel_overview_remote(&host, self.surfaces.as_ref(), &self.overview_extra);
         self.refresh_panel_text();
-        self.message = format!("Probed {host}");
+        if matches!(
+            self.box_cli,
+            BoxCliView::Known(RemoteBoxCliStatus::AuthFailed)
+        ) {
+            self.message = "SSH auth failed (askpass/key). Fix credentials; UI stays up.".into();
+        } else {
+            self.message = format!("Probed {host}");
+        }
+    }
+
+    fn open_host_editor(&mut self) {
+        let initial = self.remote.clone().unwrap_or_default();
+        self.modal = Some(Modal::TextHost(TextInput::new("OpenSSH Host", initial)));
+        self.message = "Edit OpenSSH Host".into();
+    }
+
+    fn apply_host_edit(&mut self, host: String) {
+        let host = host.trim().to_owned();
+        if host.is_empty() {
+            self.message = "Host unchanged (empty)".into();
+            return;
+        }
+        self.remote = Some(host.clone());
+        self.box_cli = BoxCliView::NotProbed;
+        self.cli_current = false;
+        self.surfaces = None;
+        self.rebuild_remote_steps(None);
+        self.refresh_panel_text();
+        self.push_log(format!("host set to {host}; probing…"));
+        self.refresh_remote();
+    }
+
+    fn install_ssh_key_action(&mut self) {
+        if !self.install_ssh_key {
+            self.message = "Start with --install-ssh-key to enable key install".into();
+            return;
+        }
+        let Some(opts) = self.remote_opts() else {
+            return;
+        };
+        self.push_log("SSH: installing key…");
+        match horto_os_ui_shared::remote_ensure_ssh_key(&SystemProcessRunner, &opts) {
+            Ok(()) => {
+                self.message = "SSH key installed (or already authorized)".into();
+                self.refresh_remote();
+            }
+            Err(e) => {
+                self.push_log(format!("ERROR ssh key: {e}"));
+                self.message = format!("SSH key failed: {e}");
+            }
+        }
     }
 
     fn run_surface_enter(&mut self) {
         match self.screen {
-            Screen::Ssh => {
-                if !self.install_ssh_key {
-                    self.message = "Start with --install-ssh-key to enable key install".into();
-                    return;
-                }
-                let Some(opts) = self.remote_opts() else {
-                    return;
-                };
-                self.push_log("SSH: installing key…");
-                match horto_os_ui_shared::remote_ensure_ssh_key(&SystemProcessRunner, &opts) {
-                    Ok(()) => {
-                        self.message = "SSH key installed (or already authorized)".into();
-                        self.refresh_remote();
-                    }
-                    Err(e) => {
-                        self.push_log(format!("ERROR ssh key: {e}"));
-                        self.message = format!("SSH key failed: {e}");
-                    }
-                }
-            }
+            Screen::Ssh => self.open_host_editor(),
             Screen::Cli => self.run_s0_sync(),
             Screen::Api | Screen::Mcp | Screen::Overview => self.refresh(),
-            Screen::Reboot => self.run_reboot(),
+            Screen::Reboot => self.arm_reboot_confirm(),
             Screen::Setup | Screen::Logs => {}
         }
     }
 
-    fn run_reboot(&mut self) {
-        if self.confirm_destructive.as_deref() != Some("reboot") {
-            self.confirm_destructive = Some("reboot".into());
-            self.message = "Reboot box? Enter/y confirm, Esc/n cancel.".into();
-            return;
-        }
-        self.confirm_destructive = None;
+    fn arm_reboot_confirm(&mut self) {
+        self.modal = Some(Modal::Confirm(ConfirmKind::Reboot));
+        self.message = "Reboot box? Enter/y confirm, Esc/n cancel.".into();
+    }
+
+    fn do_reboot(&mut self) {
         let Some(opts) = self.remote_opts() else {
             return;
         };
@@ -421,6 +505,57 @@ impl App {
                 self.message = format!("Reboot failed: {e}");
             }
         }
+    }
+
+    fn resolve_confirm_yes(&mut self) {
+        let Some(Modal::Confirm(kind)) = self.modal.take() else {
+            return;
+        };
+        match kind {
+            ConfirmKind::DestructiveStep(id) => self.execute_step(&id),
+            ConfirmKind::Reboot | ConfirmKind::RebootAfterApply => self.do_reboot(),
+            ConfirmKind::SaveToken(token) => {
+                match finish_save_api_token(&token, "y") {
+                    Ok(true) => {
+                        self.push_log(
+                            "Saved status-api bearer to ~/.config/horto-os-ui/api_token".to_owned(),
+                        );
+                        self.message = "API token saved".into();
+                    }
+                    Ok(false) => {
+                        self.push_log("Skipped saving status-api bearer locally");
+                        self.message = "Token save skipped".into();
+                    }
+                    Err(e) => {
+                        self.push_log(format!("Token save failed: {e}"));
+                        self.message = format!("Token save failed: {e}");
+                    }
+                }
+                self.maybe_offer_reboot_after_token();
+            }
+        }
+    }
+
+    fn resolve_confirm_no(&mut self) {
+        let Some(Modal::Confirm(kind)) = self.modal.take() else {
+            self.modal = None;
+            self.message = "Cancelled".into();
+            return;
+        };
+        self.message = "Cancelled".into();
+        if matches!(kind, ConfirmKind::SaveToken(_)) {
+            self.push_log("Skipped saving status-api bearer locally");
+            self.maybe_offer_reboot_after_token();
+        }
+    }
+
+    fn maybe_offer_reboot_after_token(&mut self) {
+        if !self.pending_reboot_offer {
+            return;
+        }
+        self.pending_reboot_offer = false;
+        self.modal = Some(Modal::Confirm(ConfirmKind::RebootAfterApply));
+        self.message = "Reboot after apply? Enter/y confirm, Esc/n cancel.".into();
     }
 
     fn run_s0_sync(&mut self) {
@@ -557,7 +692,7 @@ impl App {
                 cli_args,
                 use_sudo,
                 install_payload_on_success: install_payload,
-                offer_reboot_on_success: install_payload && !self.dry_run,
+                offer_reboot_on_success: false,
                 capture_output: false,
             },
         ) {
@@ -565,24 +700,14 @@ impl App {
                 for line in outcome.log.lines() {
                     self.push_log(line.to_owned());
                 }
-                if let Some(token) = outcome.api_token.as_deref() {
-                    match offer_save_api_token(token) {
-                        Ok(true) => {
-                            self.push_log(
-                                "Saved status-api bearer to ~/.config/horto-os-ui/api_token"
-                                    .to_owned(),
-                            );
-                            self.message = "Remote finished; API token saved".into();
-                        }
-                        Ok(false) => {
-                            self.push_log("Skipped saving status-api bearer locally");
-                            self.message = "Remote command finished".into();
-                        }
-                        Err(e) => {
-                            self.push_log(format!("Token save failed: {e}"));
-                            self.message = "Remote finished; token save failed".into();
-                        }
-                    }
+                let offer_reboot = install_payload && !self.dry_run;
+                if let Some(token) = outcome.api_token {
+                    self.pending_reboot_offer = offer_reboot;
+                    self.modal = Some(Modal::Confirm(ConfirmKind::SaveToken(token)));
+                    self.message = "Save API token? Enter/y confirm, Esc/n cancel.".into();
+                } else if offer_reboot {
+                    self.modal = Some(Modal::Confirm(ConfirmKind::RebootAfterApply));
+                    self.message = "Reboot after apply? Enter/y confirm, Esc/n cancel.".into();
                 } else {
                     self.message = "Remote command finished".into();
                 }
@@ -666,13 +791,12 @@ impl App {
         let ctx_probe = self.make_ctx();
         let report = horto_os_ui_shared::setup_status(&ctx_probe, self.kind);
         if let Some(row) = report.steps.iter().find(|s| s.id == id) {
-            if row.destructive && !self.dry_run && self.confirm_destructive.is_none() {
-                self.confirm_destructive = Some(id.clone());
-                self.message = format!("Step {id} is destructive. Enter/y confirm, Esc/n cancel.");
+            if row.destructive && !self.dry_run {
+                self.modal = Some(Modal::Confirm(ConfirmKind::DestructiveStep(id)));
+                self.message = "Step is destructive. Enter/y confirm, Esc/n cancel.".into();
                 return;
             }
         }
-        self.confirm_destructive = None;
         self.execute_step(&id);
     }
 
@@ -855,46 +979,21 @@ fn restore_terminal() {
     hard_reset_tty();
 }
 
-/// Leave the ratatui alt screen so SSH/sudo/prompts own the real TTY, then restore.
-fn with_suspended_tui<R>(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    f: impl FnOnce() -> R,
-) -> io::Result<R> {
-    disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen, Show)?;
-    let _ = stdout().flush();
-    let out = f();
-    enable_raw_mode()?;
-    execute!(
-        stdout(),
-        EnterAlternateScreen,
-        Hide,
-        CtClear(ClearType::All),
-        CtClear(ClearType::Purge)
-    )?;
-    terminal.clear()?;
-    drain_pending_keys();
-    Ok(out)
-}
-
-/// Drop key/escape bytes queued while the TUI was suspended (avoids `CCCC` bleed).
-fn drain_pending_keys() {
-    while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
-        let _ = event::read();
-    }
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     install_signal_handlers();
     install_panic_hook();
     let (_guard, mut terminal) = TerminalGuard::enter()?;
     let mut app = App::new(&cli);
-    // Remote: BatchMode probe at open (no alt-screen suspend; no password UI).
+    // Remote: BatchMode probe at open (no alt-screen suspend; secrets via askpass).
     if app.is_remote() {
         app.refresh();
     }
     run_app(&mut terminal, &mut app)
+}
+
+fn ctrl_c_quit(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
@@ -912,6 +1011,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if ctrl_c_quit(key) {
+            return Ok(());
+        }
+        if handle_modal_key(app, key) {
+            continue;
+        }
         if is_quit(key) {
             return Ok(());
         }
@@ -920,23 +1025,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 KeyCode::Esc | KeyCode::Char('?') => {
                     app.help_open = false;
                     app.message = READY.into();
-                }
-                _ => {}
-            }
-            continue;
-        }
-        if app.confirm_destructive.is_some() {
-            match key.code {
-                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    if app.confirm_destructive.as_deref() == Some("reboot") {
-                        with_suspended_tui(terminal, || app.run_reboot())?;
-                    } else {
-                        with_suspended_tui(terminal, || app.run_selected())?;
-                    }
-                }
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    app.confirm_destructive = None;
-                    app.message = "Cancelled".into();
                 }
                 _ => {}
             }
@@ -964,32 +1052,22 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 }
             }
             KeyCode::Char('r') => {
-                // Surface probe is BatchMode + Capture: stay in the TUI.
                 app.refresh();
                 if app.remote.is_none() {
                     app.message = "Refreshed".into();
                 }
             }
-            KeyCode::Char('a') => {
-                with_suspended_tui(terminal, || app.run_all())?;
-            }
-            KeyCode::Char('b') => {
-                with_suspended_tui(terminal, || app.run_backup_etc())?;
-            }
+            KeyCode::Char('a') => app.run_all(),
+            KeyCode::Char('b') => app.run_backup_etc(),
             KeyCode::Char('B') => app.show_disk_backup_status(),
+            KeyCode::Char('e') | KeyCode::Char('E') if app.screen == Screen::Ssh => {
+                app.open_host_editor();
+            }
+            KeyCode::Char('i') | KeyCode::Char('I') if app.screen == Screen::Ssh => {
+                app.install_ssh_key_action();
+            }
             KeyCode::Enter if app.screen == Screen::Setup => {
-                // Destructive apply: first Enter only arms the confirm dialog (stay in TUI).
-                let ask_confirm = !app.dry_run
-                    && app
-                        .step_state
-                        .selected()
-                        .and_then(|i| app.status_lines.get(i))
-                        .is_some_and(|line| line.contains(" *"));
-                if ask_confirm {
-                    app.run_selected();
-                } else {
-                    with_suspended_tui(terminal, || app.run_selected())?;
-                }
+                app.run_selected();
             }
             KeyCode::Enter
                 if matches!(
@@ -1002,16 +1080,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         | Screen::Reboot
                 ) =>
             {
-                match app.screen {
-                    Screen::Reboot => app.run_reboot(),
-                    Screen::Ssh | Screen::Cli => {
-                        with_suspended_tui(terminal, || app.run_surface_enter())?;
-                    }
-                    Screen::Api | Screen::Mcp | Screen::Overview => {
-                        app.run_surface_enter();
-                    }
-                    Screen::Setup | Screen::Logs => {}
-                }
+                app.run_surface_enter();
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(i) = app.step_state.selected() {
@@ -1036,6 +1105,38 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             }
             _ => {}
         }
+    }
+}
+
+/// Handle confirm / text modals. Returns true when the key was consumed.
+fn handle_modal_key(app: &mut App, key: KeyEvent) -> bool {
+    match app.modal {
+        Some(Modal::TextHost(_)) => {
+            let Some(Modal::TextHost(mut input)) = app.modal.take() else {
+                return true;
+            };
+            match input.handle_key(key) {
+                TextInputResult::Continue => {
+                    app.modal = Some(Modal::TextHost(input));
+                }
+                TextInputResult::Submit(value) => {
+                    app.apply_host_edit(value);
+                }
+                TextInputResult::Cancel => {
+                    app.message = "Host edit cancelled".into();
+                }
+            }
+            true
+        }
+        Some(Modal::Confirm(_)) => {
+            match confirm_key(key) {
+                ConfirmResult::Yes => app.resolve_confirm_yes(),
+                ConfirmResult::No => app.resolve_confirm_no(),
+                ConfirmResult::Ignore => {}
+            }
+            true
+        }
+        None => false,
     }
 }
 
@@ -1103,6 +1204,15 @@ fn ui(f: &mut Frame, app: &mut App) {
     if app.help_open {
         draw_help(f);
     }
+    match &app.modal {
+        Some(Modal::Confirm(kind)) => {
+            draw_confirm(f, kind.title(), &kind.body());
+        }
+        Some(Modal::TextHost(input)) => {
+            draw_text_input(f, input);
+        }
+        None => {}
+    }
 }
 
 fn draw_help(f: &mut Frame) {
@@ -1117,15 +1227,17 @@ fn draw_help(f: &mut Frame) {
         "1-8                Jump to tab (remote: 7 Reboot, 8 Logs)",
         "j k / arrows       Move step selection (Setup)",
         "Left / Right       Full / Minimal pipeline",
-        "Enter              Setup: run step · surface tabs: action",
+        "Enter              Setup: run step · SSH: edit Host · other surfaces: action",
+        "e / i              SSH: edit Host / install key (--install-ssh-key)",
         "a                  Run all pipeline steps",
         "b / B              Timestamped /etc backup / disk probe",
-        "r                  Re-probe surfaces (stay in TUI)",
+        "r                  Re-probe surfaces (stay in TUI; askpass for secrets)",
         "c                  Clear Logs (on Logs tab)",
         "d                  Toggle dry-run / apply",
-        "y / n              Confirm / cancel",
+        "y / n              Confirm / cancel (modals)",
         "",
         "Remote open probes SSH/CLI/API/MCP (BatchMode).",
+        "Passwords use system SSH_ASKPASS; y/N and Host edit stay in Ratatui.",
         "Mouse capture is off so you can select and copy text.",
         "Press Esc or ? to close.",
     ]

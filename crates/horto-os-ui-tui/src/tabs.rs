@@ -115,9 +115,10 @@ pub fn panel_ssh(remote: bool, host: &str, report: Option<&SurfaceProbeReport>) 
         Some(r) => {
             out.push_str(&format!("Status: {}\n", r.ssh.status));
             out.push_str(&format!("Key BatchMode: {}\n", r.ssh.key_ok));
-            out.push_str("Enter: install key when started with --install-ssh-key\n");
         }
     }
+    out.push_str("e / Enter: edit Host\n");
+    out.push_str("i: install key when started with --install-ssh-key\n");
     out
 }
 

@@ -50,8 +50,9 @@ Hard rules:
 | SSH login | `sshd`            | Password **or** existing public key            |
 | sudo      | `sudo` on the box | Same account password again, unless `NOPASSWD` |
 
-CLI / TUI: OpenSSH and sudo prompt in the terminal.
-Desktop (no TTY): OpenSSH `SSH_ASKPASS` (system askpass binary).
+CLI: OpenSSH and sudo prompt in the terminal (cooked stdin).
+TUI and Desktop: OpenSSH `SSH_ASKPASS` (system askpass binary) for passwords /
+sudo. TUI keeps the alt-screen up; non-secret y/N and Host edit use Ratatui modals.
 
 Remote progress: before each SSH/SCP/`ssh-copy-id` step (and before box reboot) the
 runner logs `[horto remote] PC → box '…': …` on stderr (`tracing`, default `info`).
